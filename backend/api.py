@@ -32,10 +32,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     status text NOT NULL,
     verdict text NOT NULL DEFAULT '',
     reason text NOT NULL DEFAULT '',
+    urgent boolean NOT NULL DEFAULT false,
     created_by text NOT NULL,
     created_at timestamptz NOT NULL
 );
 """
+
+# 急件记号在任务创建时一次性写死，之后不再随任何改动变化。
+MIGRATIONS = [
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS urgent boolean NOT NULL DEFAULT false",
+]
 
 
 class LoginIn(BaseModel):
@@ -47,6 +53,7 @@ class JobIn(BaseModel):
     sheet: str
     cyan_mm: float
     magenta_mm: float
+    urgent: bool = False
 
 
 def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> dict:
@@ -74,6 +81,8 @@ app = FastAPI(title="印刷套准复核台")
 def startup():
     with connect() as conn:
         conn.execute(SCHEMA)
+        for migration in MIGRATIONS:
+            conn.execute(migration)
         n = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
         if n == 0:
             now = datetime.now(timezone.utc)
@@ -106,18 +115,43 @@ def login(body: LoginIn):
 def list_jobs(_user: dict = Depends(current_user)):
     with connect() as conn:
         return conn.execute(
-            "SELECT id, sheet, cyan_mm, magenta_mm, status, verdict, reason, created_by FROM jobs ORDER BY id DESC"
+            "SELECT id, sheet, cyan_mm, magenta_mm, status, verdict, reason, urgent, created_by "
+            "FROM jobs ORDER BY id DESC"
         ).fetchall()
+
+
+@app.get("/api/lanes")
+def lanes(_user: dict = Depends(current_user)):
+    """急件车道：急件队、普通队各按编号升序，并标出下一笔将被领走的任务。
+
+    领取规则：先消化急件待处理，再碰普通待处理；同档按编号从小到大。
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT id, sheet, cyan_mm, magenta_mm, status, verdict, reason, urgent, created_by
+               FROM jobs
+               WHERE status IN ('pending', 'running')
+               ORDER BY urgent DESC, id ASC"""
+        ).fetchall()
+    urgent_queue = [r for r in rows if r["urgent"]]
+    normal_queue = [r for r in rows if not r["urgent"]]
+    # running 的任务已被领取，不再是“下一笔”；下一笔取仍在排队的队首。
+    next_job = next(
+        (r for r in (urgent_queue + normal_queue) if r["status"] == "pending"),
+        None,
+    )
+    return {"urgent": urgent_queue, "normal": normal_queue, "next": next_job}
 
 
 @app.post("/api/jobs", status_code=202)
 def enqueue(body: JobIn, user: dict = Depends(require_writer)):
     with connect() as conn:
         row = conn.execute(
-            """INSERT INTO jobs (sheet, cyan_mm, magenta_mm, status, created_by, created_at)
-               VALUES (%s, %s, %s, 'pending', %s, %s)
-               RETURNING id, sheet, status, verdict""",
-            (body.sheet.strip(), body.cyan_mm, body.magenta_mm, user["username"], datetime.now(timezone.utc)),
+            """INSERT INTO jobs (sheet, cyan_mm, magenta_mm, status, urgent, created_by, created_at)
+               VALUES (%s, %s, %s, 'pending', %s, %s, %s)
+               RETURNING id, sheet, status, verdict, urgent""",
+            (body.sheet.strip(), body.cyan_mm, body.magenta_mm, body.urgent,
+             user["username"], datetime.now(timezone.utc)),
         ).fetchone()
         conn.commit()
     return row

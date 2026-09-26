@@ -31,19 +31,25 @@ def ensure():
                 status text NOT NULL,
                 verdict text NOT NULL DEFAULT '',
                 reason text NOT NULL DEFAULT '',
+                urgent boolean NOT NULL DEFAULT false,
                 created_by text NOT NULL,
                 created_at timestamptz NOT NULL
             )"""
+        )
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS urgent boolean NOT NULL DEFAULT false"
         )
         conn.commit()
 
 
 def claim_once(conn):
+    # 急件插到领取顺序前面：先消化全部急件待处理，再碰普通待处理；
+    # 同一档内按编号从小到大。
     row = conn.execute(
         """WITH picked AS (
              SELECT id FROM jobs
              WHERE status = 'pending'
-             ORDER BY id
+             ORDER BY urgent DESC, id
              FOR UPDATE SKIP LOCKED
              LIMIT 1
            )
