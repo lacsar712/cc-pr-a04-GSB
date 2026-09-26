@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     sheet text NOT NULL,
     cyan_mm double precision NOT NULL,
     magenta_mm double precision NOT NULL,
+    urgent boolean NOT NULL DEFAULT false,
     status text NOT NULL,
     verdict text NOT NULL DEFAULT '',
     reason text NOT NULL DEFAULT '',
@@ -36,6 +37,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at timestamptz NOT NULL
 );
 """
+
+
+def ensure_urgent_column(conn):
+    exists = conn.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = 'jobs' AND column_name = 'urgent'"
+    ).fetchone()
+    if exists is None:
+        conn.execute("ALTER TABLE jobs ADD COLUMN urgent boolean NOT NULL DEFAULT false")
 
 
 class LoginIn(BaseModel):
@@ -47,6 +56,7 @@ class JobIn(BaseModel):
     sheet: str
     cyan_mm: float
     magenta_mm: float
+    urgent: bool = False
 
 
 def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> dict:
@@ -74,14 +84,15 @@ app = FastAPI(title="印刷套准复核台")
 def startup():
     with connect() as conn:
         conn.execute(SCHEMA)
+        ensure_urgent_column(conn)
         n = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
         if n == 0:
             now = datetime.now(timezone.utc)
             conn.execute(
-                """INSERT INTO jobs (sheet, cyan_mm, magenta_mm, status, verdict, reason, created_by, created_at)
+                """INSERT INTO jobs (sheet, cyan_mm, magenta_mm, urgent, status, verdict, reason, created_by, created_at)
                    VALUES
-                   ('封面-01', 0.05, -0.04, 'pending', '', '', 'printer', %s),
-                   ('内页-09', 0.40, 0.02, 'pending', '', '', 'printer', %s)""",
+                   ('封面-01', 0.05, -0.04, false, 'pending', '', '', 'printer', %s),
+                   ('内页-09', 0.40, 0.02, true, 'pending', '', '', 'printer', %s)""",
                 (now, now),
             )
         conn.commit()
@@ -106,7 +117,7 @@ def login(body: LoginIn):
 def list_jobs(_user: dict = Depends(current_user)):
     with connect() as conn:
         return conn.execute(
-            "SELECT id, sheet, cyan_mm, magenta_mm, status, verdict, reason, created_by FROM jobs ORDER BY id DESC"
+            "SELECT id, sheet, cyan_mm, magenta_mm, urgent, status, verdict, reason, created_by FROM jobs ORDER BY id DESC"
         ).fetchall()
 
 
@@ -114,10 +125,10 @@ def list_jobs(_user: dict = Depends(current_user)):
 def enqueue(body: JobIn, user: dict = Depends(require_writer)):
     with connect() as conn:
         row = conn.execute(
-            """INSERT INTO jobs (sheet, cyan_mm, magenta_mm, status, created_by, created_at)
-               VALUES (%s, %s, %s, 'pending', %s, %s)
-               RETURNING id, sheet, status, verdict""",
-            (body.sheet.strip(), body.cyan_mm, body.magenta_mm, user["username"], datetime.now(timezone.utc)),
+            """INSERT INTO jobs (sheet, cyan_mm, magenta_mm, urgent, status, created_by, created_at)
+               VALUES (%s, %s, %s, %s, 'pending', %s, %s)
+               RETURNING id, sheet, urgent, status, verdict""",
+            (body.sheet.strip(), body.cyan_mm, body.magenta_mm, body.urgent, user["username"], datetime.now(timezone.utc)),
         ).fetchone()
         conn.commit()
     return row

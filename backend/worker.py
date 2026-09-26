@@ -28,6 +28,7 @@ def ensure():
                 sheet text NOT NULL,
                 cyan_mm double precision NOT NULL,
                 magenta_mm double precision NOT NULL,
+                urgent boolean NOT NULL DEFAULT false,
                 status text NOT NULL,
                 verdict text NOT NULL DEFAULT '',
                 reason text NOT NULL DEFAULT '',
@@ -35,6 +36,11 @@ def ensure():
                 created_at timestamptz NOT NULL
             )"""
         )
+        exists = conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = 'jobs' AND column_name = 'urgent'"
+        ).fetchone()
+        if exists is None:
+            conn.execute("ALTER TABLE jobs ADD COLUMN urgent boolean NOT NULL DEFAULT false")
         conn.commit()
 
 
@@ -43,7 +49,7 @@ def claim_once(conn):
         """WITH picked AS (
              SELECT id FROM jobs
              WHERE status = 'pending'
-             ORDER BY id
+             ORDER BY urgent DESC, id
              FOR UPDATE SKIP LOCKED
              LIMIT 1
            )
